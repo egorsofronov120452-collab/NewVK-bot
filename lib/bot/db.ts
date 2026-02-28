@@ -770,6 +770,188 @@ export async function markWeeklyReportProcessed(weekStart: string, processedBy: 
   `;
 }
 
+// ============= STAFF SESSIONS (FSM ЛС бот 1) =============
+
+export interface StaffSession {
+  vkId: number;
+  state: string;
+  data: Record<string, any>;
+  messageId: number | null;
+  updatedAt: number;
+}
+
+export async function getStaffSession(vkId: number): Promise<StaffSession | null> {
+  const rows = await sql`SELECT * FROM staff_sessions WHERE vk_id = ${vkId}`;
+  if (!rows.length) return null;
+  const r = rows[0] as any;
+  return {
+    vkId: Number(r.vk_id), state: r.state,
+    data: r.data ?? {}, messageId: r.message_id ? Number(r.message_id) : null,
+    updatedAt: Number(r.updated_at),
+  };
+}
+
+export async function upsertStaffSession(vkId: number, state: string, data: Record<string, any>, messageId?: number | null) {
+  const now = Date.now();
+  await sql`
+    INSERT INTO staff_sessions (vk_id, state, data, message_id, updated_at)
+    VALUES (${vkId}, ${state}, ${JSON.stringify(data)}, ${messageId ?? null}, ${now})
+    ON CONFLICT (vk_id) DO UPDATE
+      SET state      = EXCLUDED.state,
+          data       = EXCLUDED.data,
+          message_id = EXCLUDED.message_id,
+          updated_at = ${now}
+  `;
+}
+
+export async function deleteStaffSession(vkId: number) {
+  await sql`DELETE FROM staff_sessions WHERE vk_id = ${vkId}`;
+}
+
+// ============= COURIER TASKS =============
+
+export interface CourierTaskItem {
+  name: string;
+  qty: number;
+  done: boolean;
+  instructionPhoto?: string | null;
+}
+
+export async function createCourierTask(
+  orderId: number, orderType: 'delivery' | 'taxi', courierVkId: number, items: CourierTaskItem[],
+): Promise<number> {
+  const rows = await sql`
+    INSERT INTO courier_tasks (order_id, order_type, courier_vk_id, items, status, created_at, updated_at)
+    VALUES (${orderId}, ${orderType}, ${courierVkId}, ${JSON.stringify(items)}, 'shopping', ${Date.now()}, ${Date.now()})
+    RETURNING id
+  `;
+  return (rows[0] as any).id;
+}
+
+export async function getCourierTask(taskId: number) {
+  const rows = await sql`SELECT * FROM courier_tasks WHERE id = ${taskId}`;
+  return rows[0] as any | null;
+}
+
+export async function getCourierTaskByOrder(orderId: number, orderType: 'delivery' | 'taxi') {
+  const rows = await sql`
+    SELECT * FROM courier_tasks
+    WHERE order_id = ${orderId} AND order_type = ${orderType}
+    ORDER BY id DESC LIMIT 1
+  `;
+  return rows[0] as any | null;
+}
+
+export async function updateCourierTaskItems(taskId: number, items: CourierTaskItem[], taskMsgId?: number | null) {
+  await sql`
+    UPDATE courier_tasks
+    SET items       = ${JSON.stringify(items)},
+        task_msg_id = COALESCE(${taskMsgId ?? null}, task_msg_id),
+        updated_at  = ${Date.now()}
+    WHERE id = ${taskId}
+  `;
+}
+
+export async function updateCourierTaskStatus(taskId: number, status: string, taskMsgId?: number | null) {
+  await sql`
+    UPDATE courier_tasks
+    SET status      = ${status},
+        task_msg_id = COALESCE(${taskMsgId ?? null}, task_msg_id),
+        updated_at  = ${Date.now()}
+    WHERE id = ${taskId}
+  `;
+}
+
+// ============= ORDER COMPLETIONS =============
+
+export async function recordOrderCompletion(params: {
+  orderId: number; orderType: 'delivery' | 'taxi';
+  courierVkId: number; clientVkId: number;
+  courierNickname: string | null; bankAccount: string | null;
+  isColored: boolean; totalPrice: number; totalCost: number;
+  salary: number; income: number;
+}) {
+  const now = Date.now();
+  const today = new Date().toISOString().slice(0, 10);
+  await sql`
+    INSERT INTO order_completions (
+      order_id, order_type, courier_vk_id, client_vk_id,
+      courier_nickname, bank_account, is_colored,
+      total_price, total_cost, salary, income,
+      completed_at, report_date
+    ) VALUES (
+      ${params.orderId}, ${params.orderType}, ${params.courierVkId}, ${params.clientVkId},
+      ${params.courierNickname}, ${params.bankAccount}, ${params.isColored},
+      ${params.totalPrice}, ${params.totalCost}, ${params.salary}, ${params.income},
+      ${now}, ${today}
+    )
+  `;
+}
+
+export async function getCompletionsForDate(date: string) {
+  const rows = await sql`SELECT * FROM order_completions WHERE report_date = ${date} ORDER BY completed_at ASC`;
+  return rows as any[];
+}
+
+export async function getCompletionsForWeek(weekStart: string, weekEnd: string) {
+  const rows = await sql`
+    SELECT * FROM order_completions
+    WHERE report_date >= ${weekStart} AND report_date <= ${weekEnd}
+    ORDER BY completed_at ASC
+  `;
+  return rows as any[];
+}
+
+// ============= CHAT HISTORY =============
+
+export async function saveChatMessage(params: {
+  peerId: number; chatName: string; fromId: number; fromName: string;
+  message: string; attachments: string[]; vkMsgId?: number | null;
+}) {
+  await sql`
+    INSERT INTO chat_history (peer_id, chat_name, from_id, from_name, message, attachments, vk_msg_id, sent_at)
+    VALUES (
+      ${params.peerId}, ${params.chatName}, ${params.fromId}, ${params.fromName},
+      ${params.message}, ${params.attachments}, ${params.vkMsgId ?? null}, ${Date.now()}
+    )
+  `;
+}
+
+export async function getChatHistoryForPeer(peerId: number, limit = 100, offset = 0) {
+  const rows = await sql`
+    SELECT * FROM chat_history WHERE peer_id = ${peerId}
+    ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}
+  `;
+  return rows as any[];
+}
+
+export async function getAllChatHistory(limit = 200, offset = 0) {
+  const rows = await sql`SELECT * FROM chat_history ORDER BY sent_at DESC LIMIT ${limit} OFFSET ${offset}`;
+  return rows as any[];
+}
+
+// ============= SITE SESSIONS =============
+
+export async function createSiteSession(token: string, vkId: number, ttlMs = 7 * 24 * 60 * 60 * 1000) {
+  const now = Date.now();
+  await sql`
+    INSERT INTO site_sessions (token, vk_id, created_at, expires_at)
+    VALUES (${token}, ${vkId}, ${now}, ${now + ttlMs})
+    ON CONFLICT (token) DO NOTHING
+  `;
+}
+
+export async function getSiteSession(token: string) {
+  const rows = await sql`
+    SELECT * FROM site_sessions WHERE token = ${token} AND expires_at > ${Date.now()}
+  `;
+  return rows[0] as any | null;
+}
+
+export async function deleteSiteSession(token: string) {
+  await sql`DELETE FROM site_sessions WHERE token = ${token}`;
+}
+
 // ============= CONTACT REQUESTS =============
 
 export async function createContactRequest(
